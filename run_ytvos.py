@@ -16,14 +16,13 @@ import argparse
 import warnings
 warnings.filterwarnings('ignore')
 
-
 def test(args):
 
     # initialize EVF-SAM
     tokenizer, evfsam = init_models()
 
     # initialize Alpha-CLIP
-    clip, clip_preprocess = alphaclip.load('ViT-L/14@336px', alpha_vision_ckpt_pth='weights/clip_l14_336_grit_20m_4xe.pth', device='cuda')
+    clip, clip_preprocess = alphaclip.load('ViT-L/14@336px', alpha_vision_ckpt_pth=args.alpha_clip_ckpt, device='cuda')
     clip_preprocess_mask = transforms.Compose([transforms.Resize((336, 336)), transforms.Normalize(0.5, 0.26)])
 
     # initialize Cutie
@@ -35,7 +34,7 @@ def test(args):
     save_path_prefix = os.path.join(output_dir, 'Ref_YTVOS_val')
     if not os.path.exists(save_path_prefix):
         os.makedirs(save_path_prefix)
-    root = '../DB/RVOS/YTVOS'
+    root = args.data_root
     img_folder = os.path.join(root, 'valid', 'JPEGImages')
     meta_file = os.path.join(root, 'meta_expressions', 'valid', 'meta_expressions.json')
     with open(meta_file, 'r') as f:
@@ -109,7 +108,7 @@ def test(args):
             # per-frame mask prediction
             ref_masks = []
             ref_scores = []
-            ref_num = 5
+            ref_num = args.num_references
             for ref_idx in range(ref_num):
                 i = int(ref_idx * (video_len - 1) / (ref_num - 1))
                 words = tokenizer(exp, return_tensors='pt')['input_ids'].cuda()
@@ -195,7 +194,15 @@ def test(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--use_temporal_score', action='store_true', help='Use temporal consistency for key frame selection')
+    parser.add_argument('--use_temporal_score', action='store_true')
+    parser.add_argument('--data_root', default='../DB/RVOS/YTVOS')
+    parser.add_argument('--alpha_clip_ckpt', default='weights/clip_l14_336_grit_20m_4xe.pth')
+    parser.add_argument('--num_references', type=int, default=5)
+    parser.add_argument('--tracker', default='cutie')
+    parser.add_argument('--sam2_checkpoint', default=None)
+    parser.add_argument('--sam2_config', default=None)
+    parser.add_argument('--min_frame_distance', type=int, default=15)
+    parser.add_argument('--multi_reference', action='store_true')
     args = parser.parse_args()
 
     torch.cuda.set_device(0)
