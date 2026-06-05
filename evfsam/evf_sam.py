@@ -57,6 +57,7 @@ def sigmoid_ce_loss(
 
 class EvfSamModel(PreTrainedModel):
     config_class = EvfConfig
+    _tied_weights_keys = []
     def __init__(
         self,
         config,
