@@ -105,6 +105,13 @@ def test(args):
             exp_id = meta[e]['exp_id']
             frames = meta[e]['frames']
             save_path = os.path.join(save_path_prefix, video_name, exp_id)
+            
+            # Resume logic: skip if all frames are already generated
+            expected_files = [os.path.join(save_path, f + '.png') for f in frames]
+            if os.path.exists(save_path) and all(os.path.exists(f) for f in expected_files):
+                print(f"Skipping {video_name} - {exp_id} (already processed)")
+                continue
+                
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
 
