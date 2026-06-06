@@ -47,6 +47,8 @@ def test(args):
     valid_videos = valid_test_videos - test_videos
     video_list = sorted([video for video in valid_videos])
 
+    all_temporal_scores = []
+
     # inference
     adaptive_refinement_logs = []
     for idx_, video in enumerate(video_list):
@@ -138,6 +140,10 @@ def test(args):
                 
                 score = (0.4 * conf + 0.4 * align + 0.2 * temp_consist) if args.use_temporal_score else (conf + align)
                 orig_score = conf + align
+                
+                if args.use_temporal_score:
+                    all_temporal_scores.append(temp_consist)
+                
                 return ref_mask, conf, align, temp_consist, score, orig_score
 
             ref_num = args.num_references
@@ -282,6 +288,50 @@ def test(args):
         print(f"Coarse != Refined (Changed): {changed_frames}")
         if total_processed > 0:
             print(f"Percentage of changed key frames: {(changed_frames / total_processed) * 100:.2f}%")
+        print("="*50)
+
+    if args.use_temporal_score and len(all_temporal_scores) > 0:
+        import matplotlib.pyplot as plt
+        
+        mean_temp = np.mean(all_temporal_scores)
+        std_temp = np.std(all_temporal_scores)
+        min_temp = np.min(all_temporal_scores)
+        max_temp = np.max(all_temporal_scores)
+        
+        print("\n" + "="*50)
+        print("Temporal Consistency Analysis Across ALL Candidates")
+        print("="*50)
+        print(f"Total candidate frames evaluated: {len(all_temporal_scores)}")
+        print(f"Mean temporal score: {mean_temp:.4f}")
+        print(f"Standard deviation:  {std_temp:.4f}")
+        print(f"Min temporal score:  {min_temp:.4f}")
+        print(f"Max temporal score:  {max_temp:.4f}")
+        
+        os.makedirs('debug', exist_ok=True)
+        plt.figure(figsize=(10, 6))
+        plt.hist(all_temporal_scores, bins=50, color='skyblue', edgecolor='black')
+        plt.title("Distribution of Temporal Consistency Scores Across All Candidate Frames")
+        plt.xlabel("Temporal Score")
+        plt.ylabel("Frequency")
+        plt.grid(axis='y', alpha=0.75)
+        hist_path = os.path.join('debug', 'temporal_score_histogram.png')
+        plt.savefig(hist_path)
+        print(f"Histogram saved to: {hist_path}")
+        print("-" * 50)
+        
+        print("Conclusion on Temporal Consistency Informativeness:")
+        if std_temp < 0.05:
+            print("-> Nearly constant and non-discriminative.")
+            print("   The variance is very low. Neighboring frames look almost identical across all candidates.")
+            print("   This score provides very little discriminative power for selecting the best key frame.")
+        elif std_temp < 0.15:
+            print("-> Moderately informative.")
+            print("   There is some variation, which helps filter out severe outliers (like cuts or heavy motion blur).")
+            print("   However, it shouldn't dominate the final score over confidence and alignment.")
+        else:
+            print("-> Highly informative.")
+            print("   High variance indicates significant differences in temporal stability between frames.")
+            print("   This score is highly discriminative and crucial for selecting a stable key frame.")
         print("="*50)
 
 
