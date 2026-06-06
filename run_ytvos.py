@@ -108,11 +108,17 @@ def test(args):
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
 
+            mask_cache = {}
+
             # helper to compute scores for a given frame index
             def compute_frame_score(frame_idx, exp_text):
                 words = tokenizer(exp_text, return_tensors='pt')['input_ids'].cuda()
-                ref_mask, ref_score = evfsam.inference(imgs_sam[frame_idx].unsqueeze(0).cuda(), imgs_beit[frame_idx].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
-                ref_mask = (ref_mask > 0).float()
+                if frame_idx in mask_cache:
+                    ref_mask, ref_score = mask_cache[frame_idx]
+                else:
+                    ref_mask, ref_score = evfsam.inference(imgs_sam[frame_idx].unsqueeze(0).cuda(), imgs_beit[frame_idx].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
+                    ref_mask = (ref_mask > 0).float()
+                    mask_cache[frame_idx] = (ref_mask, ref_score)
                 
                 clip_text = alphaclip.tokenize([exp_text]).cuda()
                 alpha = clip_preprocess_mask(ref_mask).cuda()
@@ -127,16 +133,40 @@ def test(args):
                 
                 temp_consist = 0.0
                 if args.use_temporal_score:
-                    sims = []
-                    for delta in [-2, -1, 1, 2]:
-                        neighbor = frame_idx + delta
-                        if 0 <= neighbor < video_len:
-                            neighbor_img_features = clip.visual(imgs_clip[neighbor].unsqueeze(0).cuda(), alpha.unsqueeze(0))
-                            neighbor_img_features = neighbor_img_features / neighbor_img_features.norm(dim=-1, keepdim=True)
-                            sim = torch.matmul(image_features, neighbor_img_features.transpose(0, 1))[0][0]
-                            sims.append(sim.item())
-                    if len(sims) > 0:
-                        temp_consist = sum(sims) / len(sims)
+                    if args.temporal_metric == 'clip':
+                        sims = []
+                        for delta in [-2, -1, 1, 2]:
+                            neighbor = frame_idx + delta
+                            if 0 <= neighbor < video_len:
+                                neighbor_img_features = clip.visual(imgs_clip[neighbor].unsqueeze(0).cuda(), alpha.unsqueeze(0))
+                                neighbor_img_features = neighbor_img_features / neighbor_img_features.norm(dim=-1, keepdim=True)
+                                sim = torch.matmul(image_features, neighbor_img_features.transpose(0, 1))[0][0]
+                                sims.append(sim.item())
+                        if len(sims) > 0:
+                            temp_consist = sum(sims) / len(sims)
+                    
+                    elif args.temporal_metric == 'mask_iou':
+                        ious = []
+                        for delta in [-2, -1, 1, 2]:
+                            neighbor = frame_idx + delta
+                            if 0 <= neighbor < video_len:
+                                if neighbor in mask_cache:
+                                    neighbor_mask, _ = mask_cache[neighbor]
+                                else:
+                                    n_mask, n_score = evfsam.inference(imgs_sam[neighbor].unsqueeze(0).cuda(), imgs_beit[neighbor].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
+                                    n_mask = (n_mask > 0).float()
+                                    mask_cache[neighbor] = (n_mask, n_score)
+                                    neighbor_mask = n_mask
+                                
+                                intersection = (ref_mask * neighbor_mask).sum().item()
+                                union = ((ref_mask + neighbor_mask) > 0).float().sum().item()
+                                if union == 0:
+                                    iou = 1.0
+                                else:
+                                    iou = intersection / union
+                                ious.append(iou)
+                        if len(ious) > 0:
+                            temp_consist = sum(ious) / len(ious)
                 
                 score = (0.4 * conf + 0.4 * align + 0.2 * temp_consist) if args.use_temporal_score else (conf + align)
                 orig_score = conf + align
@@ -355,6 +385,7 @@ if __name__ == '__main__':
     parser.add_argument('--multi_reference', action='store_true')
     parser.add_argument('--adaptive_refinement', action='store_true')
     parser.add_argument('--refinement_window', type=int, default=5)
+    parser.add_argument('--temporal_metric', choices=['clip', 'mask_iou'], default='clip')
     args = parser.parse_args()
 
     torch.cuda.set_device(0)
