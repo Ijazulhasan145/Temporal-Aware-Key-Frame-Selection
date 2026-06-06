@@ -48,6 +48,7 @@ def test(args):
     video_list = sorted([video for video in valid_videos])
 
     # inference
+    adaptive_refinement_logs = []
     for idx_, video in enumerate(video_list):
         print(idx_)
         metas = []
@@ -105,60 +106,123 @@ def test(args):
             if not os.path.exists(save_path):
                 os.makedirs(save_path)
 
-            # per-frame mask prediction
-            ref_masks = []
-            ref_scores = []
-            ref_num = args.num_references
-            for ref_idx in range(ref_num):
-                i = int(ref_idx * (video_len - 1) / (ref_num - 1))
-                words = tokenizer(exp, return_tensors='pt')['input_ids'].cuda()
-                ref_mask, ref_score = evfsam.inference(imgs_sam[i].unsqueeze(0).cuda(), imgs_beit[i].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
+            # helper to compute scores for a given frame index
+            def compute_frame_score(frame_idx, exp_text):
+                words = tokenizer(exp_text, return_tensors='pt')['input_ids'].cuda()
+                ref_mask, ref_score = evfsam.inference(imgs_sam[frame_idx].unsqueeze(0).cuda(), imgs_beit[frame_idx].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
                 ref_mask = (ref_mask > 0).float()
-                ref_masks.append(ref_mask)
-
-                # consider vision-text alignment in addition to segmentation confidence
-                clip_text = alphaclip.tokenize([exp]).cuda()
+                
+                clip_text = alphaclip.tokenize([exp_text]).cuda()
                 alpha = clip_preprocess_mask(ref_mask).cuda()
-                image_features = clip.visual(imgs_clip[i].unsqueeze(0).cuda(), alpha.unsqueeze(0))
+                image_features = clip.visual(imgs_clip[frame_idx].unsqueeze(0).cuda(), alpha.unsqueeze(0))
                 text_features = clip.encode_text(clip_text)
+                
                 image_features = image_features / image_features.norm(dim=-1, keepdim=True)
                 text_features = text_features / text_features.norm(dim=-1, keepdim=True)
                 
-                confidence = ref_score
-                alignment = torch.matmul(image_features, text_features.transpose(0, 1))[0]
+                conf = ref_score.item()
+                align = torch.matmul(image_features, text_features.transpose(0, 1))[0].item()
                 
+                temp_consist = 0.0
                 if args.use_temporal_score:
-                    # temporal_consistency
                     sims = []
                     for delta in [-2, -1, 1, 2]:
-                        neighbor = i + delta
+                        neighbor = frame_idx + delta
                         if 0 <= neighbor < video_len:
                             neighbor_img_features = clip.visual(imgs_clip[neighbor].unsqueeze(0).cuda(), alpha.unsqueeze(0))
                             neighbor_img_features = neighbor_img_features / neighbor_img_features.norm(dim=-1, keepdim=True)
                             sim = torch.matmul(image_features, neighbor_img_features.transpose(0, 1))[0][0]
                             sims.append(sim.item())
-                    
                     if len(sims) > 0:
-                        temporal_consistency = sum(sims) / len(sims)
-                    else:
-                        temporal_consistency = 0.0
-                    
-                    score = 0.4 * confidence + 0.4 * alignment + 0.2 * temporal_consistency
-                    print(f"Frame {i}: confidence={confidence.item():.4f}, alignment={alignment.item():.4f}, temporal_consistency={temporal_consistency:.4f}, score={score.item():.4f}")
-                else:
-                    score = confidence + alignment
-                    print(f"Frame {i}: confidence={confidence.item():.4f}, alignment={alignment.item():.4f}, score={score.item():.4f}")
+                        temp_consist = sum(sims) / len(sims)
                 
-                ref_scores.append(score)
+                score = (0.4 * conf + 0.4 * align + 0.2 * temp_consist) if args.use_temporal_score else (conf + align)
+                orig_score = conf + align
+                return ref_mask, conf, align, temp_consist, score, orig_score
 
-            # select reference frame with highest mask score
-            best_ref_idx = torch.argmax(torch.stack(ref_scores, dim=0), dim=0)
-            best_i = int(best_ref_idx * (video_len - 1) / (ref_num - 1))
+            ref_num = args.num_references
+            coarse_results = []
+            
+            # Stage 1: Coarse Search
+            for ref_idx in range(ref_num):
+                i = int(ref_idx * (video_len - 1) / (ref_num - 1))
+                ref_mask, conf, align, temp_consist, score, orig_score = compute_frame_score(i, exp)
+                coarse_results.append({
+                    'index': i, 'mask': ref_mask, 'conf': conf, 'align': align,
+                    'temp': temp_consist, 'score': score, 'orig_score': orig_score
+                })
+                print(f"Coarse Frame {i}: conf={conf:.4f}, align={align:.4f}, temp={temp_consist:.4f}, score={score:.4f}, orig_score={orig_score:.4f}")
+            
+            # Identify coarse key frames
+            original_best_result = max(coarse_results, key=lambda x: x['orig_score'])
+            coarse_best_result = max(coarse_results, key=lambda x: x['score'])
+            
+            original_best_i = original_best_result['index']
+            coarse_best_i = coarse_best_result['index']
+            
+            # Stage 2: Adaptive Refinement Search
+            refined_best_result = coarse_best_result
+            
+            if args.adaptive_refinement and args.use_temporal_score:
+                local_results = []
+                coarse_indices = [res['index'] for res in coarse_results]
+                
+                window_start = max(0, coarse_best_i - args.refinement_window)
+                window_end = min(video_len - 1, coarse_best_i + args.refinement_window)
+                
+                print(f"Refinement window: [{window_start}, {window_end}] around {coarse_best_i}")
+                
+                for i in range(window_start, window_end + 1):
+                    # Check if already computed in coarse search
+                    if i in coarse_indices:
+                        idx_in_coarse = coarse_indices.index(i)
+                        local_results.append(coarse_results[idx_in_coarse])
+                    else:
+                        ref_mask, conf, align, temp_consist, score, orig_score = compute_frame_score(i, exp)
+                        local_results.append({
+                            'index': i, 'mask': ref_mask, 'conf': conf, 'align': align,
+                            'temp': temp_consist, 'score': score, 'orig_score': orig_score
+                        })
+                        print(f"Local Frame {i}: conf={conf:.4f}, align={align:.4f}, temp={temp_consist:.4f}, score={score:.4f}")
+                
+                refined_best_result = max(local_results, key=lambda x: x['score'])
+            
+            refined_best_i = refined_best_result['index']
+            best_i = refined_best_i
+            best_ref_mask = refined_best_result['mask']
+            
+            # Logging
+            log_entry = {
+                'video_name': video_name,
+                'exp_id': exp_id,
+                'coarse_frame_index': coarse_best_i,
+                'refined_frame_index': refined_best_i,
+                'confidence_score': refined_best_result['conf'],
+                'alignment_score': refined_best_result['align'],
+                'temporal_score': refined_best_result['temp'],
+                'coarse_final_score': coarse_best_result['score'],
+                'refined_final_score': refined_best_result['score']
+            }
+            adaptive_refinement_logs.append(log_entry)
+            
+            # Visual Debugging
+            if idx_ < 20:
+                debug_dir = os.path.join('debug', 'keyframe_comparison', f"{video_name}_{exp_id}")
+                os.makedirs(debug_dir, exist_ok=True)
+                
+                import shutil
+                orig_img_path = os.path.join(img_folder, video_name, frames[original_best_i] + '.jpg')
+                coarse_img_path = os.path.join(img_folder, video_name, frames[coarse_best_i] + '.jpg')
+                refined_img_path = os.path.join(img_folder, video_name, frames[refined_best_i] + '.jpg')
+                
+                shutil.copy(orig_img_path, os.path.join(debug_dir, 'original_findtrack_keyframe.jpg'))
+                shutil.copy(coarse_img_path, os.path.join(debug_dir, 'temporal_aware_keyframe.jpg'))
+                shutil.copy(refined_img_path, os.path.join(debug_dir, 'refined_keyframe.jpg'))
 
             # forward pass
             for i in range(best_i, video_len):
                 if i == best_i:
-                    mask_prob = processor.step(imgs_cutie[i].cuda(), ref_masks[best_ref_idx].squeeze(0), objects=[1])
+                    mask_prob = processor.step(imgs_cutie[i].cuda(), best_ref_mask.squeeze(0), objects=[1])
                 else:
                     mask_prob = processor.step(imgs_cutie[i].cuda())
                 mask = processor.output_prob_to_mask(mask_prob).float()
@@ -176,7 +240,7 @@ def test(args):
             # backward pass
             for i in range(best_i, -1, -1):
                 if i == best_i:
-                    mask_prob = processor.step(imgs_cutie[i].cuda(), ref_masks[best_ref_idx].squeeze(0), objects=[1])
+                    mask_prob = processor.step(imgs_cutie[i].cuda(), best_ref_mask.squeeze(0), objects=[1])
                 else:
                     mask_prob = processor.step(imgs_cutie[i].cuda())
                 mask = processor.output_prob_to_mask(mask_prob).float()
@@ -191,6 +255,35 @@ def test(args):
                 save_file = os.path.join(save_path, frames[i] + '.png')
                 mask.save(save_file)
 
+    if args.adaptive_refinement:
+        import csv
+        csv_file = 'debug/adaptive_refinement_log.csv'
+        os.makedirs(os.path.dirname(csv_file), exist_ok=True)
+        
+        with open(csv_file, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                'video_name', 'exp_id', 'coarse_frame_index', 'refined_frame_index',
+                'confidence_score', 'alignment_score', 'temporal_score',
+                'coarse_final_score', 'refined_final_score'
+            ])
+            writer.writeheader()
+            for row in adaptive_refinement_logs:
+                writer.writerow(row)
+                
+        total_processed = len(adaptive_refinement_logs)
+        changed_frames = sum(1 for row in adaptive_refinement_logs if row['coarse_frame_index'] != row['refined_frame_index'])
+        unchanged_frames = total_processed - changed_frames
+        
+        print("\n" + "="*50)
+        print("Adaptive Refinement Analysis")
+        print("="*50)
+        print(f"Total evaluations processed: {total_processed}")
+        print(f"Coarse == Refined (Unchanged): {unchanged_frames}")
+        print(f"Coarse != Refined (Changed): {changed_frames}")
+        if total_processed > 0:
+            print(f"Percentage of changed key frames: {(changed_frames / total_processed) * 100:.2f}%")
+        print("="*50)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -203,6 +296,8 @@ if __name__ == '__main__':
     parser.add_argument('--sam2_config', default=None)
     parser.add_argument('--min_frame_distance', type=int, default=15)
     parser.add_argument('--multi_reference', action='store_true')
+    parser.add_argument('--adaptive_refinement', action='store_true')
+    parser.add_argument('--refinement_window', type=int, default=5)
     args = parser.parse_args()
 
     torch.cuda.set_device(0)
