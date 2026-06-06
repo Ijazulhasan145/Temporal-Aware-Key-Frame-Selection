@@ -297,15 +297,17 @@ def test(args):
         std_temp = np.std(all_temporal_scores)
         min_temp = np.min(all_temporal_scores)
         max_temp = np.max(all_temporal_scores)
+        cv_temp = std_temp / mean_temp if mean_temp != 0 else 0
         
         print("\n" + "="*50)
         print("Temporal Consistency Analysis Across ALL Candidates")
         print("="*50)
         print(f"Total candidate frames evaluated: {len(all_temporal_scores)}")
-        print(f"Mean temporal score: {mean_temp:.4f}")
-        print(f"Standard deviation:  {std_temp:.4f}")
-        print(f"Min temporal score:  {min_temp:.4f}")
-        print(f"Max temporal score:  {max_temp:.4f}")
+        print(f"Mean Temporal Score: {mean_temp:.4f}")
+        print(f"Standard Deviation:  {std_temp:.4f}")
+        print(f"Minimum Temporal Score:  {min_temp:.4f}")
+        print(f"Maximum Temporal Score:  {max_temp:.4f}")
+        print(f"Coefficient of Variation:  {cv_temp:.4f}")
         
         os.makedirs('debug', exist_ok=True)
         plt.figure(figsize=(10, 6))
@@ -319,19 +321,24 @@ def test(args):
         print(f"Histogram saved to: {hist_path}")
         print("-" * 50)
         
-        print("Conclusion on Temporal Consistency Informativeness:")
+        print("\nFinal Conclusion:")
+        print("1. Is temporal consistency nearly constant?")
         if std_temp < 0.05:
-            print("-> Nearly constant and non-discriminative.")
-            print("   The variance is very low. Neighboring frames look almost identical across all candidates.")
-            print("   This score provides very little discriminative power for selecting the best key frame.")
-        elif std_temp < 0.15:
-            print("-> Moderately informative.")
-            print("   There is some variation, which helps filter out severe outliers (like cuts or heavy motion blur).")
-            print("   However, it shouldn't dominate the final score over confidence and alignment.")
+            print("   -> Yes, the score is nearly constant across most frames due to very low standard deviation.")
         else:
-            print("-> Highly informative.")
-            print("   High variance indicates significant differences in temporal stability between frames.")
-            print("   This score is highly discriminative and crucial for selecting a stable key frame.")
+            print("   -> No, there is noticeable variation across different frames.")
+            
+        print("2. Does temporal consistency provide meaningful discrimination between frames?")
+        if cv_temp < 0.05:
+            print("   -> No, the variation is too small relative to the mean to provide meaningful discrimination.")
+        else:
+            print("   -> Yes, the variation is sufficient to help distinguish stable frames from unstable ones.")
+            
+        print("3. Would temporal consistency significantly affect frame ranking?")
+        if (std_temp * 0.2) < 0.02: 
+            print("   -> No, given its weight (0.2), the variation is too small to significantly alter the ranking compared to confidence and alignment scores.")
+        else:
+            print("   -> Yes, the variance is high enough that when multiplied by its weight (0.2), it can change the top-ranked key frame.")
         print("="*50)
 
 
