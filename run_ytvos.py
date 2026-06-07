@@ -50,7 +50,7 @@ def test(args):
     all_temporal_scores = []
 
     # inference
-    adaptive_refinement_logs = []
+    selected_key_frames_logs = []
     for idx_, video in enumerate(video_list):
         print(idx_)
         metas = []
@@ -175,7 +175,7 @@ def test(args):
                         if len(ious) > 0:
                             temp_consist = sum(ious) / len(ious)
                 
-                score = (0.4 * conf + 0.4 * align + 0.2 * temp_consist) if args.use_temporal_score else (conf + align)
+                score = (args.w_conf * conf + args.w_align * align + args.w_temp * temp_consist) if args.use_temporal_score else (conf + align)
                 orig_score = conf + align
                 
                 if args.use_temporal_score:
@@ -203,50 +203,20 @@ def test(args):
             original_best_i = original_best_result['index']
             coarse_best_i = coarse_best_result['index']
             
-            # Stage 2: Adaptive Refinement Search
-            refined_best_result = coarse_best_result
-            
-            if args.adaptive_refinement and args.use_temporal_score:
-                local_results = []
-                coarse_indices = [res['index'] for res in coarse_results]
-                
-                window_start = max(0, coarse_best_i - args.refinement_window)
-                window_end = min(video_len - 1, coarse_best_i + args.refinement_window)
-                
-                print(f"Refinement window: [{window_start}, {window_end}] around {coarse_best_i}")
-                
-                for i in range(window_start, window_end + 1):
-                    # Check if already computed in coarse search
-                    if i in coarse_indices:
-                        idx_in_coarse = coarse_indices.index(i)
-                        local_results.append(coarse_results[idx_in_coarse])
-                    else:
-                        ref_mask, conf, align, temp_consist, score, orig_score = compute_frame_score(i, exp)
-                        local_results.append({
-                            'index': i, 'mask': ref_mask, 'conf': conf, 'align': align,
-                            'temp': temp_consist, 'score': score, 'orig_score': orig_score
-                        })
-                        print(f"Local Frame {i}: conf={conf:.4f}, align={align:.4f}, temp={temp_consist:.4f}, score={score:.4f}")
-                
-                refined_best_result = max(local_results, key=lambda x: x['score'])
-            
-            refined_best_i = refined_best_result['index']
-            best_i = refined_best_i
-            best_ref_mask = refined_best_result['mask']
+            best_i = coarse_best_i
+            best_ref_mask = coarse_best_result['mask']
             
             # Logging
             log_entry = {
                 'video_name': video_name,
                 'exp_id': exp_id,
-                'coarse_frame_index': coarse_best_i,
-                'refined_frame_index': refined_best_i,
-                'confidence_score': refined_best_result['conf'],
-                'alignment_score': refined_best_result['align'],
-                'temporal_score': refined_best_result['temp'],
-                'coarse_final_score': coarse_best_result['score'],
-                'refined_final_score': refined_best_result['score']
+                'frame_index': best_i,
+                'confidence_score': coarse_best_result['conf'],
+                'alignment_score': coarse_best_result['align'],
+                'temporal_score': coarse_best_result['temp'],
+                'final_score': coarse_best_result['score']
             }
-            adaptive_refinement_logs.append(log_entry)
+            selected_key_frames_logs.append(log_entry)
             
             # Visual Debugging
             if idx_ < 20:
@@ -256,11 +226,9 @@ def test(args):
                 import shutil
                 orig_img_path = os.path.join(img_folder, video_name, frames[original_best_i] + '.jpg')
                 coarse_img_path = os.path.join(img_folder, video_name, frames[coarse_best_i] + '.jpg')
-                refined_img_path = os.path.join(img_folder, video_name, frames[refined_best_i] + '.jpg')
                 
                 shutil.copy(orig_img_path, os.path.join(debug_dir, 'original_findtrack_keyframe.jpg'))
                 shutil.copy(coarse_img_path, os.path.join(debug_dir, 'temporal_aware_keyframe.jpg'))
-                shutil.copy(refined_img_path, os.path.join(debug_dir, 'refined_keyframe.jpg'))
 
             # forward pass
             for i in range(best_i, video_len):
@@ -298,33 +266,19 @@ def test(args):
                 save_file = os.path.join(save_path, frames[i] + '.png')
                 mask.save(save_file)
 
-    if args.adaptive_refinement:
-        import csv
-        csv_file = 'debug/adaptive_refinement_log.csv'
-        os.makedirs(os.path.dirname(csv_file), exist_ok=True)
-        
-        with open(csv_file, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                'video_name', 'exp_id', 'coarse_frame_index', 'refined_frame_index',
-                'confidence_score', 'alignment_score', 'temporal_score',
-                'coarse_final_score', 'refined_final_score'
-            ])
-            writer.writeheader()
-            for row in adaptive_refinement_logs:
-                writer.writerow(row)
-                
-        total_processed = len(adaptive_refinement_logs)
-        changed_frames = sum(1 for row in adaptive_refinement_logs if row['coarse_frame_index'] != row['refined_frame_index'])
-        unchanged_frames = total_processed - changed_frames
+    # Print average selected scores
+    if len(selected_key_frames_logs) > 0:
+        avg_conf = sum(log['confidence_score'] for log in selected_key_frames_logs) / len(selected_key_frames_logs)
+        avg_align = sum(log['alignment_score'] for log in selected_key_frames_logs) / len(selected_key_frames_logs)
+        avg_temp = sum(log['temporal_score'] for log in selected_key_frames_logs) / len(selected_key_frames_logs)
         
         print("\n" + "="*50)
-        print("Adaptive Refinement Analysis")
+        print("Selected Key Frames Statistics")
         print("="*50)
-        print(f"Total evaluations processed: {total_processed}")
-        print(f"Coarse == Refined (Unchanged): {unchanged_frames}")
-        print(f"Coarse != Refined (Changed): {changed_frames}")
-        if total_processed > 0:
-            print(f"Percentage of changed key frames: {(changed_frames / total_processed) * 100:.2f}%")
+        print(f"Total key frames selected: {len(selected_key_frames_logs)}")
+        print(f"Average selected confidence score: {avg_conf:.4f}")
+        print(f"Average selected alignment score:  {avg_align:.4f}")
+        print(f"Average selected temporal score:   {avg_temp:.4f}")
         print("="*50)
 
     if args.use_temporal_score and len(all_temporal_scores) > 0:
@@ -390,9 +344,10 @@ if __name__ == '__main__':
     parser.add_argument('--sam2_config', default=None)
     parser.add_argument('--min_frame_distance', type=int, default=15)
     parser.add_argument('--multi_reference', action='store_true')
-    parser.add_argument('--adaptive_refinement', action='store_true')
-    parser.add_argument('--refinement_window', type=int, default=5)
     parser.add_argument('--temporal_metric', choices=['clip', 'mask_iou'], default='clip')
+    parser.add_argument('--w_conf', type=float, default=0.4)
+    parser.add_argument('--w_align', type=float, default=0.4)
+    parser.add_argument('--w_temp', type=float, default=0.2)
     args = parser.parse_args()
 
     torch.cuda.set_device(0)
