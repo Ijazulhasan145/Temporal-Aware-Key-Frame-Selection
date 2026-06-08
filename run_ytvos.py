@@ -140,40 +140,27 @@ def test(args):
                 
                 temp_consist = 0.0
                 if args.use_temporal_score:
-                    if args.temporal_metric == 'clip':
-                        sims = []
-                        for delta in [-2, -1, 1, 2]:
-                            neighbor = frame_idx + delta
-                            if 0 <= neighbor < video_len:
-                                neighbor_img_features = clip.visual(imgs_clip[neighbor].unsqueeze(0).cuda(), alpha.unsqueeze(0))
-                                neighbor_img_features = neighbor_img_features / neighbor_img_features.norm(dim=-1, keepdim=True)
-                                sim = torch.matmul(image_features, neighbor_img_features.transpose(0, 1))[0][0]
-                                sims.append(sim.item())
-                        if len(sims) > 0:
-                            temp_consist = sum(sims) / len(sims)
-                    
-                    elif args.temporal_metric == 'mask_iou':
-                        ious = []
-                        for delta in [-2, -1, 1, 2]:
-                            neighbor = frame_idx + delta
-                            if 0 <= neighbor < video_len:
-                                if neighbor in mask_cache:
-                                    neighbor_mask, _ = mask_cache[neighbor]
-                                else:
-                                    n_mask, n_score = evfsam.inference(imgs_sam[neighbor].unsqueeze(0).cuda(), imgs_beit[neighbor].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
-                                    n_mask = (n_mask > 0).float()
-                                    mask_cache[neighbor] = (n_mask, n_score)
-                                    neighbor_mask = n_mask
-                                
-                                intersection = (ref_mask * neighbor_mask).sum().item()
-                                union = ((ref_mask + neighbor_mask) > 0).float().sum().item()
-                                if union == 0:
-                                    iou = 1.0
-                                else:
-                                    iou = intersection / union
-                                ious.append(iou)
-                        if len(ious) > 0:
-                            temp_consist = sum(ious) / len(ious)
+                    ious = []
+                    for delta in [-2, -1, 1, 2]:
+                        neighbor = frame_idx + delta
+                        if 0 <= neighbor < video_len:
+                            if neighbor in mask_cache:
+                                neighbor_mask, _ = mask_cache[neighbor]
+                            else:
+                                n_mask, n_score = evfsam.inference(imgs_sam[neighbor].unsqueeze(0).cuda(), imgs_beit[neighbor].unsqueeze(0).cuda(), words, resize_shape, original_size_list)
+                                n_mask = (n_mask > 0).float()
+                                mask_cache[neighbor] = (n_mask, n_score)
+                                neighbor_mask = n_mask
+                            
+                            intersection = (ref_mask * neighbor_mask).sum().item()
+                            union = ((ref_mask + neighbor_mask) > 0).float().sum().item()
+                            if union == 0:
+                                iou = 1.0
+                            else:
+                                iou = intersection / union
+                            ious.append(iou)
+                    if len(ious) > 0:
+                        temp_consist = sum(ious) / len(ious)
                 
                 score = (args.w_conf * conf + args.w_align * align + args.w_temp * temp_consist) if args.use_temporal_score else (conf + align)
                 orig_score = conf + align
@@ -344,9 +331,8 @@ if __name__ == '__main__':
     parser.add_argument('--sam2_config', default=None)
     parser.add_argument('--min_frame_distance', type=int, default=15)
     parser.add_argument('--multi_reference', action='store_true')
-    parser.add_argument('--temporal_metric', choices=['clip', 'mask_iou'], default='clip')
-    parser.add_argument('--w_conf', type=float, default=0.4)
-    parser.add_argument('--w_align', type=float, default=0.4)
+    parser.add_argument('--w_conf', type=float, default=0.5)
+    parser.add_argument('--w_align', type=float, default=0.3)
     parser.add_argument('--w_temp', type=float, default=0.2)
     args = parser.parse_args()
 
